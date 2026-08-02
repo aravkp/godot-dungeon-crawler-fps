@@ -1,0 +1,13 @@
+Source: "Pixel Art Animations - Slashes" (itch.io asset pack).
+
+slash_arc.png     128x128 pack, "Slash 3", color5  - crescent blade arc, 9 frames
+slash_impact.png  128x128 pack, "Slash 1", color5  - multi-scratch burst, 9 frames
+
+Both sheets are 640x256: a 5-column, 2-row grid of 128x128 cells, read in
+row-major order. Nine frames are used; the tenth cell is empty.
+
+color5 is the blue/cyan ramp (#00eeff -> #0059ff over a white core). It was
+picked over the pack's other four (lime, red, purple, orange) because red is
+reserved for blood and the cold ramp reads as steel against the dark levels.
+The other colours are still in the original download if a second weapon ever
+wants its own tint.

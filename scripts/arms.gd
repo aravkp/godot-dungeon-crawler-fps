@@ -30,6 +30,8 @@ extends Node3D
 
 signal dagger_unlocked
 
+const SLASH := preload("res://scripts/slash_fx.gd")
+
 ## Bare-fists idle, used until the dagger is picked up.
 @export var idle_anim: StringName = &"guard_idle"
 ## Idle once the dagger is in hand. The mount was fitted against this pose.
@@ -61,6 +63,19 @@ signal dagger_unlocked
 @export_group("Melee")
 @export var melee_range: float = 2.4
 @export var melee_damage: int = 1
+
+@export_group("Slash FX")
+## Blade slashes, dagger only - bare fists throw no arc. See slash_fx.gd.
+@export var slash_fx: bool = true
+## How far in front of the camera the arc is drawn. Nearer reads bigger and
+## faster; too near and it clips the hands.
+@export var slash_distance: float = 0.85
+## World size of one arc pixel. 0.0075 puts the 128 px sheet across roughly
+## two thirds of the screen height at the default fov and distance.
+@export var slash_size: float = 0.0075
+## Playback rate of the nine sheet frames. Wants to be a touch shorter than the
+## swing clip, or the arc is still hanging there when the blade has stopped.
+@export var slash_fps: float = 42.0
 
 @onready var anim: AnimationPlayer = $AnimationPlayer
 
@@ -125,6 +140,12 @@ func _melee(clip: StringName) -> bool:
 		return false
 	_busy = true
 	anim.play(clip, blend_time, attack_speed)
+	# Mirrored on the odd swing, so the alternating pair of knife clips throws
+	# an alternating pair of arcs. _next_swing has not been advanced yet, so its
+	# parity here is the parity of the clip that just started.
+	if slash_fx and has_dagger:
+		SLASH.arc(get_parent() as Node3D, _next_swing % 2 == 1,
+			slash_distance, slash_size, slash_fps)
 	swing()
 	return true
 
@@ -162,11 +183,25 @@ func swing() -> Object:
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit.is_empty():
 		return null
+	# Sparks on whatever the blade actually met, wall or throat alike - that is
+	# what the ray says happened, and it is what tells a connect from a whiff.
+	# Hosted on the level, never on the collider: a killing blow frees the
+	# corpse and would take the burst with it.
+	if slash_fx and has_dagger:
+		SLASH.impact(_level(), hit["position"], -dir)
 	var target: Object = hit.get("collider")
 	if target and target.has_method("take_hit"):
 		target.take_hit(melee_damage, hit["position"], dir)
 		return target
 	return null
+
+## Somewhere to hang a hit effect that outlives whatever was hit. `owner` is the
+## fallback because a tool script that instantiates the level itself never sets
+## current_scene, and the effect would silently not appear under the probe.
+func _level() -> Node:
+	var scene := get_tree().current_scene
+	return scene if scene != null else owner
+
 
 func _shooter() -> CollisionObject3D:
 	var n: Node = self

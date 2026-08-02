@@ -148,7 +148,14 @@ to start armed.
   alternation so looting mid-combo cannot open on the second swing. Emits
   `dagger_unlocked`.
 - `swing() -> Object` — short raycast (`melee_range = 2.4`) from the camera;
-  calls `take_hit` on anything that has it. Fires at the *start* of the clip.
+  calls `take_hit` on anything that has it, and spawns the hit spark on anything
+  it touches at all. Fires at the *start* of the clip.
+
+**The dagger throws a slash arc, the fists throw nothing.** `_melee()` fires
+`slash_fx.gd`'s `arc()` alongside the clip and `swing()` fires its `impact()` on
+whatever the ray met; both are gated on `has_dagger`, and the whole thing is off
+with `slash_fx = false`. Mirrored per swing from `_next_swing` parity, read
+*before* the counter advances, so the arc matches the clip that just started.
 
 `_idle()` picks between the two idles; `_on_animation_finished` compares against
 it rather than a fixed `idle_anim`, or looting the dagger mid-swing re-queues the
@@ -477,6 +484,44 @@ apart in motion rather than in colour. Unshaded, because the corridor level is
 pitch dark between its handful of lamps and a shaded chunk spawned off one is
 simply invisible.
 
+### `slash_fx.gd`
+The dagger's blade slashes, and the third member of the `blood.gd` / `debris.gd`
+family — static helpers on an `Object`, `preload`ed rather than reached by
+`class_name`, same self-freeing timer. Two effects, both nine-frame pixel-art
+sheets (see `assets/vfx/`):
+
+- **`arc()`** — a crescent in front of the camera on **every** dagger swing, hit
+  or miss, which is what makes a whiff still read as a swing.
+- **`impact()`** — a small scratch burst wherever the melee ray landed, wall or
+  throat alike. Only this one distinguishes connecting from missing.
+
+Fists get neither; `arms.gd` gates both on `has_dagger`.
+
+**`arc()` must be parented to the `ViewModel`, never to `Arms`.** The arms rig
+carries a 180° Y rotation to correct its +Z forward axis, so a sprite parented
+under it lands *behind* the camera and is silently invisible. The ViewModel is
+also the bob/sway pivot, so the arc swings with the hands for free.
+
+**The two alternating knife clips get mirrored arcs** (`flip_h`, driven by
+`_next_swing` parity). One bool, and it is most of what stops a held attack
+looking like a looping GIF.
+
+`impact()` takes **any `Node` as host, not a `Node3D`** — the level roots in this
+project are plain `Node`s, and an earlier `is Node3D` guard made every hit spark
+silently not appear. A `Node3D` under a plain `Node` just gets an identity parent
+transform. Host still has to outlive the target, same rule as `blood.gd`: a
+killing blow frees the corpse and would take the burst with it.
+
+Arc is `no_depth_test` (a screen effect — depth-testing it clips it in half when
+the player stands near a wall); impact is `ALPHA_CUT_DISCARD` so it sorts against
+geometry and against the blood sharing its position. Both are unshaded, both use
+`TEXTURE_FILTER_NEAREST` — the default linear filter smears a 128 px cell blown
+up to most of the screen into mush.
+
+**Setting `frame` to the last index emits `animation_finished`** exactly as
+playing onto it does, which is what frees the sprite. Anything stepping the
+animation by hand has to disconnect that first — see `_probe_slash.gd`.
+
 ### `pickup.gd` (StaticBody3D)
 A floating item the player takes with `E`, built **in code** via
 `pickup.spawn(host, at, item_id)` — there is no `.tscn`, so the item table is the
@@ -672,7 +717,16 @@ against re-guessing (`_`-prefixed, like `_death_strip.gd` / `_gun_hand.gd`):
 "$GODOT" --path . -s tools/_probe_creature.gd
 # what is inside a character FBX: skeleton, clips, height, ragdoll-chain match
 "$GODOT" --headless --path . -s tools/_probe_character.gd -- res://path/to.fbx
+# both dagger arcs frame by frame, plus a hit spark against a planted wall
+"$GODOT" --path . -s tools/_probe_slash.gd
 ```
+
+`_probe_slash.gd` is the one probe that cannot screen-grab its subject live: the
+arc lasts ~215 ms and a 720×420 PNG costs ~95 ms to save, so a real-time capture
+samples two of the nine frames. It pauses the sprite (`speed_scale = 0`) and
+steps `frame` by hand instead — and has to drop `Engine.time_scale` to 0.02 while
+it does, or `slash_fx`'s fallback timer frees the sprite out from under the
+camera around frame 7.
 
 `_probe_smash.gd` drives everything through `take_hit()`, the same entry point the
 melee ray uses, and its real assertions are the ones a still cannot show: the pair
@@ -843,6 +897,7 @@ All of it is rebuilt by `build_terrain.gd`; editing the `WorldEnvironment` or
 | `assets/chest/` | `TreasureChest.FBX` + PBR set in `Textures/`. Lid (`chest_top`) is a separate mesh and the file carries its own open animation | Chest |
 | `assets/watcher/` | `watcher.fbx` — "Watcher of the Hollow Eye", 65-bone Mixamo rig, mace. Textures **must** live at `assets/watcher/minimosnter/texture/` — the FBX hardcodes that relative path, and moving them silently unbinds every material | Watcher enemy |
 | `assets/creature/` | `creature.fbx` — the Warden. **Static mesh, no rig, no animations**, 5960 tris, one material. Its origin sits at the *top* of the mesh and its bounds are dominated by the blade, so size and offset are both measured, never typed | The opening cutscene |
+| `assets/vfx/` | `slash_arc.png` / `slash_impact.png` — 640×256 sheets from "Pixel Art Animations - Slashes". Each is a **5×2 grid of 128² cells read row-major**, nine frames used and the tenth empty. The pack's blue/cyan ramp of five; red is left free for blood, and the cold ramp reads as steel in the dark levels | `slash_fx.gd` |
 | `assets/fonts/` | `m5x7.ttf` — pixel font, authored at **16 px**. Godot's importer detects it as a pixel font and turns off subpixel positioning and hinting by itself. Use integer multiples of 16 for sizes; 34 and 40 come out mushy | `cutscene.gd` |
 | `assets/retro_character/` | `retro_character.fbx` — 38-bone Mixamo rig, 1504 tris, 16 clips (idle, walk, run, strafe, three boxing attacks, a knockdown, plus a 37.8 s concatenation of all of them and two export artifacts). 4.198 units tall as imported. Matches **11/11** of `ragdoll.gd`'s `CHAIN`. Texture needs re-binding by material name `BODY.011` | unused — see "Not implemented" |
 
