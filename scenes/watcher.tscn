@@ -1,0 +1,18 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/watcher_enemy.gd" id="1_3y8gi"]
+[ext_resource type="PackedScene" path="res://assets/watcher/watcher.fbx" id="2_xrvts"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_y5rbt"]
+radius = 0.45
+height = 1.9
+
+[node name="Watcher" type="CharacterBody3D" unique_id=408348768 groups=["enemies", "watchers"]]
+script = ExtResource("1_3y8gi")
+
+[node name="Model" type="Node3D" parent="." unique_id=1484533859 instance=ExtResource("2_xrvts")]
+transform = Transform3D(0.80598545, 0, 0, 0, 0.80598545, 0, 0, 0, 0.80598545, 0.063857324, -0.0012952808, -2.5857944)
+
+[node name="Collision" type="CollisionShape3D" parent="." unique_id=1131776723]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.95, 0)
+shape = SubResource("CapsuleShape3D_y5rbt")

@@ -1,0 +1,17 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# macOS
+.DS_Store
+
+# Generated: the contact sheets and stills the tools/ probes write. Every one is
+# reproducible by re-running the script that made it, and together they are
+# larger than the rest of the repository.
+.shots/
+
+# NOT REDISTRIBUTABLE. pumpkin_mountain_2160.png is free to use but may not be
+# redistributed, so it is kept out of this repository - see the README for where
+# to get it. tools/build_terrain.gd falls back to a procedural dusk sky without
+# it, so a fresh clone builds and runs; it just does not look the same.
+assets/sky/

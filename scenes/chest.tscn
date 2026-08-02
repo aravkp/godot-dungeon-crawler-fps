@@ -1,0 +1,16 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/chest.gd" id="1_sy5e1"]
+[ext_resource type="PackedScene" path="res://assets/chest/TreasureChest.FBX" id="2_gqd3d"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_yue2o"]
+size = Vector3(0.9793471, 0.9466539, 0.6256273)
+
+[node name="Chest" type="StaticBody3D" unique_id=2013323319 groups=["interactable"]]
+script = ExtResource("1_sy5e1")
+
+[node name="Model" type="Node3D" parent="." unique_id=1282515887 instance=ExtResource("2_gqd3d")]
+
+[node name="Collision" type="CollisionShape3D" parent="." unique_id=1435879708]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0018173903, 0.4732025, -0.012666866)
+shape = SubResource("BoxShape3D_yue2o")

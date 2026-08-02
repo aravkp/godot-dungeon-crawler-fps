@@ -1,0 +1,17 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/bat_enemy.gd" id="1_cnldk"]
+[ext_resource type="PackedScene" path="res://assets/chonchon/chonchon.fbx" id="2_48wkk"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_ss3tx"]
+radius = 0.38
+
+[node name="Bat" type="CharacterBody3D" unique_id=1385330965 groups=["bats", "enemies"]]
+motion_mode = 1
+script = ExtResource("1_cnldk")
+
+[node name="Model" type="Node3D" parent="." unique_id=888997712 instance=ExtResource("2_48wkk")]
+transform = Transform3D(0.10906672, 0, 0, 0, 0.10906672, 0, 0, 0, 0.10906672, 0.061425067, -0.08958904, -0.2784133)
+
+[node name="Collision" type="CollisionShape3D" parent="." unique_id=486649977]
+shape = SubResource("SphereShape3D_ss3tx")
