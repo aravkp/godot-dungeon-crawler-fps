@@ -4,7 +4,11 @@ extends CharacterBody3D
 ##
 ## Unlike the bat, this one is not horde fodder. Watchers are placed by hand in
 ## trios around a camp, stand guard until one of them spots the player, and then
-## the whole trio charges together and beats on you in melee. Three hits kill.
+## the whole trio charges together and beats on you in melee.
+##
+## THE ONLY THING IN THE GAME THAT CAN KILL YOU, and it does it in one hit -
+## the same rule it dies under. The mace is what makes a camp a threat rather
+## than a set of targets; bats still do nothing but swarm.
 ##
 ## Squad alerting is deliberately structural rather than a manager: every
 ## watcher in a trio is a sibling under one Camp_NN node, so waking the group is
@@ -64,8 +68,11 @@ const ATTACK_HIT_AT := 1.00
 enum State { GUARD, CHASE, ATTACK, HURT, DEAD }
 
 @export_group("Combat")
-## Three hits, like a hobgoblin. Every damage source in the game deals 1.
-@export var max_health: int = 3
+## ONE HIT. Everything in this project that deals damage deals 1, so a watcher
+## now dies to any connecting swing. The HURT state and CLIP_HURT survive at 1
+## health only because nothing forbids a level from setting this higher - at the
+## default they are unreachable.
+@export var max_health: int = 1
 @export var attack_damage: int = 1
 ## Close enough to stop advancing and start swinging.
 @export var attack_range: float = 2.3
@@ -228,6 +235,11 @@ func _has_line_of_sight() -> bool:
 func _can_strike() -> bool:
 	if _target == null or not is_instance_valid(_target):
 		return false
+	# Nothing to gain from beating a corpse: the player is already dead and
+	# take_hit() would refuse the blow anyway. They respawn elsewhere, so the
+	# watcher is left holding the camp, which is what it is for.
+	if _target.has_method("is_dead") and _target.is_dead():
+		return false
 	var flat := Vector3(_target.global_position.x - global_position.x, 0.0,
 		_target.global_position.z - global_position.z)
 	if flat.length() > attack_range:
@@ -386,9 +398,11 @@ func _face(flat: Vector3, delta: float) -> void:
 	var want := atan2(flat.x, flat.z)
 	rotation.y = lerp_angle(rotation.y, want, clampf(delta * turn_rate, 0.0, 1.0))
 
-## The mace connects. The player currently has no health system, so this is a
-## no-op against them by design - take_hit() is the contract it will use when
-## one exists.
+## The mace connects, and connecting KILLS - the player answers the same
+## take_hit() contract the enemies do, and one hit is fatal both ways. The two
+## gates below are what make a swing dodgeable: the reach is checked at the
+## moment of impact, not when the swing started, so backing out of it during the
+## wind-up works.
 func _land_hit() -> void:
 	if _target == null or not is_instance_valid(_target):
 		return
@@ -432,6 +446,9 @@ func _die(at: Vector3, from: Vector3) -> void:
 	_spray(at, 2.0)
 	_state = State.DEAD
 	died.emit()
+	# Captured BEFORE it is cleared: the ragdoll inherits it, or a watcher killed
+	# mid-charge stops dead in the air and drops straight down.
+	var carried := velocity
 	velocity = Vector3.ZERO
 	# Clear the LAYER, not the shapes. Disabling the shapes stops the corpse
 	# detecting the floor, so is_on_floor() never comes back true and the DEAD
@@ -456,7 +473,7 @@ func _die(at: Vector3, from: Vector3) -> void:
 		actors.append_array(get_tree().get_nodes_in_group("player"))
 		RAGDOLL.ignore(_ragdoll, actors)
 		var dir := from.normalized() if not from.is_zero_approx() else Vector3.UP
-		RAGDOLL.start(_ragdoll, at, dir * ragdoll_impulse)
+		RAGDOLL.start(_ragdoll, at, dir * ragdoll_impulse, carried)
 		return
 
 	if _anim:

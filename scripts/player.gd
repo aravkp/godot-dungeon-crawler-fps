@@ -1,24 +1,55 @@
 extends CharacterBody3D
 
-## First-person controller with wall running.
+## First-person controller.
 ##
-## WASD / arrows to move, Shift to sprint, Space to jump.
-## In the air, brush a wall while moving and you will run along it; Space
-## while wall running kicks off it.
+## WASD / arrows to move, Shift to CROUCH, Space to jump, E to interact.
 ## Escape releases the mouse, click recaptures it.
+##
+## There is one ground speed. Sprint and wall running were both removed: the
+## corridor level is 4 m wide and 4 m tall, which is not enough room to wall run
+## in, and a sprint on top of a single walk speed only ever made the walk feel
+## like the punishment. What Shift does now is lower you.
+##
+## CROUCHING IS A REAL SIZE CHANGE, not a camera trick. The capsule shrinks from
+## `stand_height` to `crouch_height` and the collider is lifted by half the
+## difference so the FEET stay put - shrinking it in place would drop the body
+## and leave the player standing in a hole. That is what lets a 1.35 m gap under
+## a jammed gate be genuinely impassable standing and genuinely passable crouched,
+## with no trigger volumes and nothing to keep in sync.
+##
+## You cannot stand back up under something. Releasing Shift runs a capsule query
+## at standing size first, and stays crouched while it hits anything.
+##
+## ONE HIT KILLS YOU. There is no health, no armour and no damage numbers - the
+## same rule the enemies live under. take_hit() is the damage contract every
+## other body in the project answers (bat, watcher, breakable, chest), so the
+## watchers' mace needed nothing added to it: the call was already there and was
+## already landing, it just had nothing to land on. `amount` is accepted for the
+## contract and deliberately ignored.
+
+signal died
 
 @export_group("Movement")
 @export var walk_speed: float = 8.5
-@export var sprint_speed: float = 13.5
 @export var acceleration: float = 75.0
 ## Air control is deliberately weaker than ground control.
 @export var air_acceleration: float = 30.0
 @export var respawn_below_y: float = -10.0
 
+@export_group("Crouch")
+## Held, not toggled - a toggle plus a ceiling that refuses to let you rise is a
+## state the player cannot see and cannot explain.
+@export var crouch_key: Key = KEY_SHIFT
+## Total capsule height while crouched. The capsule radius is 0.5, so this can
+## never go below 1.0 - a capsule is two hemispheres and cannot be shorter than
+## its own diameter.
+@export var crouch_height: float = 1.15
+## Slow enough that ducking under something is a decision rather than a detour.
+@export var crouch_speed: float = 3.6
+## Seconds for the full stand <-> crouch transition, both ways.
+@export var crouch_time: float = 0.14
+
 @export_group("Jump")
-## Apex is velocity^2 / (2 * rise_gravity), so 13.0 reaches ~3.25m - up from
-## 2.12m. High enough to clear the 3.2m ramp platform from flat ground and to
-## reach a wall run from a standing start.
 @export var jump_velocity: float = 13.0
 ## Custom gravity rather than the project default (9.8): a snappy jump needs
 ## to rise fast and fall faster, which one constant cannot give you.
@@ -27,20 +58,19 @@ extends CharacterBody3D
 ## Grace period to still jump just after walking off an edge.
 @export var coyote_time: float = 0.12
 
-@export_group("Wall Run")
-@export var wall_run_enabled: bool = true
-@export var wall_check_distance: float = 0.85
-## Below this horizontal speed a wall is just a wall.
-@export var wall_run_min_speed: float = 4.0
-@export var wall_run_speed: float = 13.0
-@export var wall_run_max_time: float = 1.7
-## Downward drift while attached, instead of full gravity.
-@export var wall_run_sink: float = 2.5
-@export var wall_jump_up: float = 9.5
-@export var wall_jump_push: float = 9.0
-@export var wall_run_tilt_degrees: float = 14.0
-## Stops you re-gripping the wall you just kicked off.
-@export var wall_reattach_delay: float = 0.28
+@export_group("Damage")
+## Seconds the camera takes to go down. It is the whole death animation - there
+## is no third-person body to ragdoll, so the view collapsing IS the death.
+@export var death_fall_time: float = 0.5
+## Where the eye ends up, in metres above the feet. Low enough to read as lying
+## on the floor rather than kneeling.
+@export var death_eye_height: float = 0.25
+## How far the view tips as you go down. Cosmetic, but a drop with no roll reads
+## as the camera sinking through the floor rather than as a body falling over.
+@export var death_roll_degrees: float = 78.0
+## How long the corpse view holds before control comes back at the spawn point.
+## Long enough to see what killed you, short enough not to be a punishment.
+@export var respawn_delay: float = 2.2
 
 @export_group("Look")
 @export var mouse_sensitivity: float = 0.0025
@@ -48,7 +78,7 @@ extends CharacterBody3D
 
 @export_group("Interact")
 ## How far the E prompt reaches. Cast down the camera axis, so it aims at the
-## crosshair exactly like the melee swing and the finger gun do.
+## crosshair exactly like the melee swing does.
 @export var interact_range: float = 3.5
 
 @export_group("View Bob")
@@ -59,6 +89,7 @@ extends CharacterBody3D
 @onready var head: Node3D = $Head
 @onready var view_model: Node3D = $Head/Camera3D/ViewModel
 @onready var camera: Camera3D = $Head/Camera3D
+@onready var _shape: CollisionShape3D = $PlayerCollision
 
 var _focus: Object = null          # what the crosshair is currently over
 var _spawn_point: Vector3
@@ -69,19 +100,60 @@ var _view_model_rest: Vector3
 var _jump_was_down: bool = false
 var _coyote: float = 0.0
 
-var _wall_running: bool = false
-var _wall_normal: Vector3 = Vector3.ZERO
-var _wall_side: float = 0.0        # +1 wall on the right, -1 on the left
-var _wall_timer: float = 0.0
-var _wall_cooldown: float = 0.0
-var _tilt: float = 0.0
+## 0 = fully standing, 1 = fully crouched.
+var _crouch: float = 0.0
+var _capsule: CapsuleShape3D
+var _stand_height: float = 2.0
+var _stand_head_y: float = 0.7
+var _stand_shape_y: float = 0.0
+## Reused every frame by the stand-up test rather than rebuilt.
+var _clearance: CapsuleShape3D
+var _clearance_query: PhysicsShapeQueryParameters3D
+
+var _dead: bool = false
+var _death_t: float = 0.0
+## Which way the view tips, set from the direction of the killing blow.
+var _death_roll: float = 0.0
+## Whether the viewmodel's handlers were running when the blow landed, so giving
+## them back cannot switch on something that was already off - the same rule
+## cutscene.gd follows, and for the same reason: dying during the opening scene
+## must not hand the player their arms back early.
+var _arms_were_active: bool = false
 
 func _ready() -> void:
 	_spawn_point = global_position
 	_view_model_rest = view_model.position
+	# Whatever the scene was authored with is the standing pose - read, never
+	# assumed, so a level can spawn a differently sized player.
+	_capsule = _shape.shape as CapsuleShape3D
+	if _capsule:
+		_stand_height = _capsule.height
+	_stand_head_y = head.position.y
+	_stand_shape_y = _shape.position.y
+	_build_clearance_probe()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
+func _build_clearance_probe() -> void:
+	_clearance = CapsuleShape3D.new()
+	if _capsule:
+		# A hair under the real capsule both ways. At exactly its size the probe
+		# reports the floor and the wall being leaned on as blockers, and standing
+		# up becomes impossible everywhere.
+		_clearance.radius = _capsule.radius - 0.02
+		_clearance.height = _stand_height - 0.04
+	_clearance_query = PhysicsShapeQueryParameters3D.new()
+	_clearance_query.shape = _clearance
+	_clearance_query.collide_with_areas = false
+	_clearance_query.exclude = [get_rid()]
+
 func _unhandled_input(event: InputEvent) -> void:
+	# A corpse does not look around, interact, or recapture the mouse. Escape is
+	# the one thing still worth honouring - being killed with the cursor locked in
+	# should not trap it there.
+	if _dead:
+		if event.is_action_pressed(&"ui_cancel"):
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		rotate_y(-event.relative.x * mouse_sensitivity)
 		var limit := deg_to_rad(pitch_limit_degrees)
@@ -98,33 +170,71 @@ func _unhandled_input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _physics_process(delta: float) -> void:
+	if _dead:
+		_tick_death(delta)
+		return
+
 	var jump_down := Input.is_physical_key_pressed(KEY_SPACE)
 	var jump_pressed := jump_down and not _jump_was_down
 	_jump_was_down = jump_down
 
-	var wish := _wish_direction()
-	_wall_cooldown = maxf(0.0, _wall_cooldown - delta)
-
 	if is_on_floor():
 		_coyote = coyote_time
-		_end_wall_run()
 	else:
 		_coyote = maxf(0.0, _coyote - delta)
 
-	if _wall_running:
-		_wall_run_step(delta, jump_pressed)
-	else:
-		_ground_air_step(delta, wish, jump_pressed)
-		if wall_run_enabled and not is_on_floor() and _wall_cooldown <= 0.0:
-			_try_start_wall_run()
+	_update_crouch(delta)
+	_ground_air_step(delta, _wish_direction(), jump_pressed)
 
 	move_and_slide()
-	_update_tilt(delta)
+	head.rotation = Vector3(_pitch, 0.0, 0.0)
 	_update_view_bob(delta)
 	_scan_focus()
 
 	if global_position.y < respawn_below_y:
 		_respawn()
+
+## Drives the capsule, not just the camera. Called before move_and_slide so the
+## body moves at the size it is going to be tested at this frame.
+func _update_crouch(delta: float) -> void:
+	var want := Input.is_physical_key_pressed(crouch_key)
+	# Let go under a low ceiling and you stay down. Only worth testing while
+	# actually crouched - standing up from standing is free.
+	if not want and _crouch > 0.0 and _standing_blocked():
+		want = true
+	var step: float = delta / maxf(crouch_time, 0.001)
+	_crouch = move_toward(_crouch, 1.0 if want else 0.0, step)
+	if _capsule == null:
+		return
+	var h := lerpf(_stand_height, crouch_height, _crouch)
+	_capsule.height = h
+	# LOWER the collider by half of what came off, so the bottom of the capsule -
+	# the feet - stays exactly where it was.
+	#
+	# The sign here is the whole mechanic. A capsule at local y = 0 with height H
+	# spans -H/2 .. +H/2, so its bottom is at -H/2. Shrink H and the bottom rises
+	# by (H_stand - H_crouch)/2 unless the centre comes down by the same amount.
+	# Getting this backwards does not look like a collider bug: the body is left
+	# floating, falls until the raised capsule bottom finds the floor, and the
+	# camera goes with it - the player appears to SINK INTO THE GROUND, ending up
+	# with the eye about 17 cm off the floor.
+	_shape.position.y = _stand_shape_y - (_stand_height - h) * 0.5
+	# The body origin sits half a standing height above the feet and does not
+	# move, so the crouched capsule's top is at that much below zero plus the
+	# crouched height. Park the eye just under it.
+	var crouch_eye := crouch_height - _stand_height * 0.5 - 0.13
+	head.position.y = lerpf(_stand_head_y, crouch_eye, _crouch)
+
+## Would a standing capsule fit where we are right now?
+func _standing_blocked() -> bool:
+	if _clearance == null:
+		return false
+	_clearance_query.transform = Transform3D(Basis.IDENTITY, global_position)
+	return not get_world_3d().direct_space_state.intersect_shape(_clearance_query, 1).is_empty()
+
+## True while ducked at all - handy for other scripts.
+func is_crouching() -> bool:
+	return _crouch > 0.5
 
 ## What is the crosshair on? Runs in _physics_process because querying the
 ## space state outside a physics frame is not safe.
@@ -190,82 +300,17 @@ func _ground_air_step(delta: float, wish: Vector3, jump_pressed: bool) -> void:
 		velocity.y = jump_velocity
 		_coyote = 0.0
 
-	var speed := sprint_speed if Input.is_physical_key_pressed(KEY_SHIFT) else walk_speed
+	# Speed follows the crouch blend rather than switching at a threshold, so
+	# ducking bleeds speed off instead of dropping it in one frame.
+	var speed := lerpf(walk_speed, crouch_speed, _crouch)
 	var accel := acceleration if is_on_floor() else air_acceleration
 	var target := wish * speed
 	velocity.x = move_toward(velocity.x, target.x, accel * delta)
 	velocity.z = move_toward(velocity.z, target.z, accel * delta)
 
-## Looks for a wall either side of the player, ignoring floors and ceilings.
-func _probe_wall() -> Dictionary:
-	var space := get_world_3d().direct_space_state
-	var origin := global_position + Vector3.UP * 0.2
-	for side: float in [1.0, -1.0]:
-		var dir: Vector3 = global_transform.basis.x * side
-		var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * wall_check_distance)
-		q.exclude = [get_rid()]
-		var hit := space.intersect_ray(q)
-		# A near-vertical surface only; a ramp underfoot is not a wall.
-		if hit and absf((hit.normal as Vector3).y) < 0.3:
-			return {"side": side, "normal": hit.normal as Vector3}
-	return {}
-
-func _try_start_wall_run() -> void:
-	if Vector2(velocity.x, velocity.z).length() < wall_run_min_speed:
-		return
-	var w := _probe_wall()
-	if w.is_empty():
-		return
-	_wall_running = true
-	_wall_normal = w["normal"]
-	_wall_side = w["side"]
-	_wall_timer = 0.0
-	# Kill any downward momentum so contact feels like a catch, not a slide.
-	velocity.y = maxf(velocity.y, 0.0)
-
-func _wall_run_step(delta: float, jump_pressed: bool) -> void:
-	_wall_timer += delta
-	var w := _probe_wall()
-	if w.is_empty() or _wall_timer > wall_run_max_time or is_on_floor():
-		_end_wall_run()
-		return
-	_wall_normal = w["normal"]
-
-	if jump_pressed:
-		# Kick up and away from the wall.
-		velocity = _wall_normal * wall_jump_push + Vector3.UP * wall_jump_up
-		_end_wall_run()
-		return
-
-	# Run along the wall, in whichever direction we are facing.
-	var along := _wall_normal.cross(Vector3.UP).normalized()
-	if along.dot(-transform.basis.z) < 0.0:
-		along = -along
-	# A little push into the wall keeps contact through corners.
-	var horizontal := along * wall_run_speed - _wall_normal * 2.0
-	velocity.x = horizontal.x
-	velocity.z = horizontal.z
-	velocity.y = move_toward(velocity.y, -wall_run_sink, 45.0 * delta)
-
-func _end_wall_run() -> void:
-	if not _wall_running:
-		return
-	_wall_running = false
-	_wall_normal = Vector3.ZERO
-	_wall_side = 0.0
-	_wall_cooldown = wall_reattach_delay
-
-## Rolls the camera away from the wall while running it.
-func _update_tilt(delta: float) -> void:
-	var target := 0.0
-	if _wall_running:
-		target = deg_to_rad(wall_run_tilt_degrees) * -_wall_side
-	_tilt = lerpf(_tilt, target, clampf(delta * 9.0, 0.0, 1.0))
-	head.rotation = Vector3(_pitch, 0.0, _tilt)
-
 func _update_view_bob(delta: float) -> void:
 	var planar_speed := Vector2(velocity.x, velocity.z).length()
-	var reference := maxf(sprint_speed, 0.001)
+	var reference := maxf(walk_speed, 0.001)
 	if is_on_floor() and planar_speed > 0.1:
 		_bob_time += delta * bob_frequency * (planar_speed / reference)
 	else:
@@ -279,14 +324,94 @@ func _update_view_bob(delta: float) -> void:
 	)
 	view_model.position = view_model.position.lerp(_view_model_rest + bob, delta * 12.0)
 
+# --- damage ------------------------------------------------------------------
+
+## The damage contract, same signature the enemies and the breakables answer.
+## Returns whether the hit landed - false once already dead, so a watcher that
+## gets a second swing off before the respawn cannot kill you twice.
+##
+## `amount` is ignored on purpose: one hit kills, whatever swung it. `at` is
+## unused here (there is no body to spray blood off) and `from` only chooses
+## which way the view tips.
+func take_hit(_amount: int = 1, _at: Vector3 = Vector3.INF,
+		from: Vector3 = Vector3.ZERO) -> bool:
+	if _dead:
+		return false
+	_die(from)
+	return true
+
+func is_dead() -> bool:
+	return _dead
+
+func _die(from: Vector3) -> void:
+	_dead = true
+	_death_t = 0.0
+	velocity = Vector3.ZERO
+	# Fall AWAY from the blow: a hit travelling to your right knocks you over to
+	# your right. The camera looks down -Z, so tipping the head right is a
+	# negative rotation about +Z. Straight-on hits pick a side rather than
+	# dropping the view dead level, which reads as sinking through the floor.
+	var sideways := global_transform.basis.x.dot(from)
+	var side := -1.0 if sideways >= 0.0 else 1.0
+	_death_roll = deg_to_rad(death_roll_degrees) * side
+	# Stop the viewmodel dead. It keeps its own input in _process, so a held
+	# attack button would otherwise go on throwing punches from the floor.
+	_set_arms_active(false)
+	_set_hud_dead(true)
+	died.emit()
+	get_tree().create_timer(respawn_delay).timeout.connect(_respawn)
+
+## The whole death animation: the view drops to the floor and rolls over. The
+## body still falls, so being killed in mid-air lands the corpse where it would
+## have landed rather than leaving it hanging.
+func _tick_death(delta: float) -> void:
+	_death_t += delta
+	if not is_on_floor():
+		velocity.y -= fall_gravity * delta
+	else:
+		velocity.y = minf(velocity.y, 0.0)
+	velocity.x = move_toward(velocity.x, 0.0, acceleration * delta)
+	velocity.z = move_toward(velocity.z, 0.0, acceleration * delta)
+	move_and_slide()
+
+	var t := clampf(_death_t / maxf(death_fall_time, 0.001), 0.0, 1.0)
+	# Ease out, so the head drops fast and settles rather than gliding down.
+	var e := 1.0 - pow(1.0 - t, 3.0)
+	# The body origin sits half a standing height above the feet, so an eye
+	# height measured off the floor has to come back through that.
+	var floor_eye := death_eye_height - _stand_height * 0.5
+	head.position.y = lerpf(_stand_head_y, floor_eye, e)
+	head.rotation = Vector3(_pitch, 0.0, lerpf(0.0, _death_roll, e))
+
+## Both handlers are remembered rather than assumed on - see _arms_were_active.
+func _set_arms_active(active: bool) -> void:
+	var arms := get_tree().get_first_node_in_group("viewmodel")
+	if arms == null:
+		return
+	if not active:
+		_arms_were_active = arms.is_processing()
+		arms.set_process(false)
+		arms.set_process_unhandled_input(false)
+		return
+	arms.set_process(_arms_were_active)
+	arms.set_process_unhandled_input(_arms_were_active)
+
+func _set_hud_dead(dead: bool) -> void:
+	var hud := get_tree().get_first_node_in_group("hud")
+	if hud and hud.has_method("set_dead"):
+		hud.set_dead(dead)
+
 func _respawn() -> void:
 	global_position = _spawn_point
 	velocity = Vector3.ZERO
 	_pitch = 0.0
-	_tilt = 0.0
-	_end_wall_run()
+	_crouch = 0.0
+	if _capsule:
+		_capsule.height = _stand_height
+	_shape.position.y = _stand_shape_y
+	head.position.y = _stand_head_y
 	head.rotation = Vector3.ZERO
-
-## True while attached to a wall - handy for other scripts.
-func is_wall_running() -> bool:
-	return _wall_running
+	if _dead:
+		_dead = false
+		_set_arms_active(true)
+		_set_hud_dead(false)

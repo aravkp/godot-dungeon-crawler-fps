@@ -67,10 +67,15 @@ func _init() -> void:
 	for _i in range(20):
 		await physics_frame
 
-	# Killed from the front, chest height - three hits at once.
+	# Killed from the front, chest height, with ONE point of damage - which is
+	# what everything in the game deals. Over-damaging here would hide a watcher
+	# that had quietly gone back to needing several hits.
 	var chest: Vector3 = w.global_position + Vector3(0, 1.25, 0.25)
-	var landed: bool = w.take_hit(3, chest, Vector3(0, 0.25, -1).normalized())
-	print("take_hit -> ", landed)
+	var landed: bool = w.take_hit(1, chest, Vector3(0, 0.25, -1).normalized())
+	# State.DEAD is 4 in {GUARD, CHASE, ATTACK, HURT, DEAD}.
+	var dead: bool = int(w.get("_state")) == 4
+	print("take_hit(1) -> %s   state=%d   ONE-HIT KILL: %s"
+		% [landed, int(w.get("_state")), "yes" if dead else "*** NO ***"])
 	var sim := w.find_child("Ragdoll", true, false)
 	print("ragdoll node: ", sim)
 	if sim:

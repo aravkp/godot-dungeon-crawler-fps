@@ -78,6 +78,9 @@ func _init() -> void:
 	_build_lights()
 	_build_environment()
 	_place_gates()
+	# After the gates, so a ramp never lands on a gate's cell; before the props,
+	# so a crate never lands under one and blocks the crouch line.
+	_place_ramps()
 	_place_props()
 	_place_enemies()
 	_place_goal()
@@ -390,6 +393,9 @@ const DOOR_HITS := 1
 const DOOR_COLOR := Color(0.38, 0.26, 0.14)
 ## One gate per this many eligible choke points.
 const DOOR_EVERY := 3
+## Every this-many-th gate after the first is jammed partway open - duck under it
+## or smash it, but you cannot lift it. See door.gd.
+const JAM_EVERY := 2
 
 ## The route index of the first gate, or -1 if the seed produced none. Enemies
 ## are kept strictly past it - see _is_pack_cell().
@@ -398,6 +404,7 @@ var _first_gate_i: int = -1
 func _place_gates() -> void:
 	var eligible := 0
 	var n := 0
+	var jammed := 0
 	# Never on the very first boundary: the player should see one coming before
 	# meeting one.
 	for i in range(2, _route.size() - 1):
@@ -411,12 +418,21 @@ func _place_gates() -> void:
 		eligible += 1
 		if eligible % DOOR_EVERY != 1:
 			continue
+		# The FIRST gate is never jammed. It is where the player learns that a
+		# gate is a thing you open, and a jammed one teaches the wrong lesson
+		# first. After that every JAM_EVERY-th one is stuck partway up and has to
+		# be ducked under or smashed.
+		var is_jammed := n > 0 and n % JAM_EVERY == 0
 		_gate("Gate_%02d" % n, _coarse_world(a) + Vector3(float(dir.x), 0.0, float(dir.y)) * CELL,
-			EDGES[dir])
+			EDGES[dir], is_jammed)
 		if _first_gate_i < 0:
 			_first_gate_i = i
+		if is_jammed:
+			jammed += 1
+		_gate_at[i] = true
 		n += 1
-	print("  gates=%d of %d chokes  first at route %d" % [n, eligible, _first_gate_i])
+	print("  gates=%d of %d chokes (%d jammed)  first at route %d"
+		% [n, eligible, jammed, _first_gate_i])
 
 ## A gate is only worth building where the corridor is exactly one cell wide on
 ## both sides of the boundary. Hung off a room, half of it would seal nothing and
@@ -429,7 +445,7 @@ func _is_choke(a: Vector2i, b: Vector2i, perp: Vector2i) -> bool:
 
 ## The gate node carries the yaw; everything inside it is built square, with
 ## local +X across the corridor and local +Z along the direction of travel.
-func _gate(nm: String, at: Vector3, yaw: float) -> void:
+func _gate(nm: String, at: Vector3, yaw: float, jammed: bool = false) -> void:
 	var gate := Node3D.new()
 	gate.name = nm
 	_level.add_child(gate)
@@ -457,8 +473,15 @@ func _gate(nm: String, at: Vector3, yaw: float) -> void:
 	# still needs nothing - that is just the box.
 	# Turned to face back down the corridor: the leaf's lit side is its local -Z,
 	# and the player always arrives from the gate's -Z.
-	_breakable(GATE_DOOR, "Door", Vector3.ZERO, 180.0, DOOR_HITS, DOOR_COLOR,
-		GATE_SCALE, gate, DOOR)
+	# `jammed` travels with the other exports because door.gd reads it in _ready(),
+	# which add_child() runs immediately. Raising the leaf, on the other hand, has
+	# to happen HERE and afterwards: _breakable sets position on the line after
+	# add_child, so a lift applied inside _ready() is overwritten before anyone
+	# sees it. The builder owns where things are.
+	var leaf := _breakable(GATE_DOOR, "Door", Vector3.ZERO, 180.0, DOOR_HITS,
+		DOOR_COLOR, GATE_SCALE, gate, DOOR, {"jammed": jammed})
+	if jammed and leaf:
+		leaf.position.y += leaf.get("jam_gap")
 
 	# The corridor lamps sit at cell centres, so a gate on a boundary lands
 	# between two of them and the leaf renders as a black hole in the wall - the
@@ -480,6 +503,222 @@ func _gate(nm: String, at: Vector3, yaw: float) -> void:
 	lamp.omni_range = 5.0
 	lamp.shadow_enabled = false
 
+# --- collapsed ramps -------------------------------------------------------
+
+## A slab of the ceiling that has come down across the corridor and wedged
+## itself there. You CROUCH under its low edge.
+##
+## It is the crouch tutorial before it is an obstacle, which is why the first one
+## goes in EARLY - before the first gate, while nothing is chasing the player.
+## Meeting a jammed gate as the first thing you ever have to duck under teaches
+## the mechanic in the middle of a fight.
+##
+## Deliberately NOT built from the dungeon kit. It is boxes wearing a texture the
+## kit never uses - a pale granite where the shell is warm brick - because a
+## collapse has to read as "this was not built like this" at a glance, and down a
+## dark corridor the only thing carrying that is the material.
+const RAMP_TEX := "res://assets/textures/Stone/Horror_Stone_05-512x512.png"
+## How many of the eligible straights get one, and the ceiling on that. Which
+## ones is drawn from _rng, so ramps move with SEED like everything else here.
+const RAMP_FRACTION := 0.45
+const RAMP_MAX := 5
+## Minimum route indices between two ramps, so a seed cannot stack them.
+const RAMP_MIN_SPACING := 4
+## Route indices reserved for the opening and kept clear of ramps: 0 is the
+## spawn, **1 is where the Warden rises for the cutscene**, 2 is the dagger
+## chest. A ramp on any of them is built through the opening scene.
+const RAMP_CLEAR_ROUTE := 2
+const RAMP_TILT_DEG := 22.0
+## Clearance under the low edge. Has to sit between the crouched player capsule
+## (1.15 m) and the standing one (2.0 m), clear of both - see player.gd.
+const RAMP_GAP := 1.32
+const RAMP_LENGTH := 3.6
+const RAMP_THICK := 0.36
+## Corridor cross-section: a coarse cell is 2x2 kit modules.
+const CORRIDOR_W := CELL * 2.0
+
+## Route indices that already carry something, so the next placer can avoid them.
+var _gate_at := {}
+var _ramp_at := {}
+
+func _place_ramps() -> void:
+	var mat := _ramp_material()
+	var candidates: Array[int] = []
+	for i in range(1, _route.size() - 1):
+		if _ramp_ok(i):
+			candidates.append(i)
+	var chosen := _choose_ramps(candidates)
+	for i in chosen:
+		var a: Vector2i = _route[i]
+		var dir: Vector2i = _route[i + 1] - a
+		_ramp("Ramp_%02d" % _ramp_at.size(), _coarse_world(a), EDGES[dir], mat)
+		_ramp_at[i] = true
+	# Candidates are printed too: when no ramp lands before the first gate it is
+	# because the seed offered no eligible cell there, not because the picker
+	# ignored one, and only this line tells the two apart.
+	print("  ramps=%d at routes %s   (candidates %s, first gate %d)"
+		% [chosen.size(), str(chosen), str(candidates), _first_gate_i])
+
+## Can a cell take a collapsed ramp at all?
+func _ramp_ok(i: int) -> bool:
+	# Nothing in the opening. Route 1 is where the Warden rises, and a ramp there
+	# is built straight through the cutscene - which is exactly what the first
+	# version of this did, because it took the first eligible straight and route
+	# 1 is usually it.
+	if i <= RAMP_CLEAR_ROUTE:
+		return false
+	# A gate recorded at index j stands on the boundary between cells j and j+1,
+	# so BOTH j and j-1 put one within 2 m of this cell's centre - close enough
+	# that the leaf stands inside the crouch gap and seals the very thing you are
+	# meant to duck through. Checking only `i` misses half of them.
+	if _gate_at.has(i) or _gate_at.has(i - 1):
+		return false
+	if _is_pack_cell(i):
+		return false
+	var a: Vector2i = _route[i]
+	var dir: Vector2i = _route[i + 1] - a
+	if absi(dir.x) + absi(dir.y) != 1:
+		return false
+	# Straight only. On a turn the slab spans the wrong axis and one end buries
+	# itself in the outside wall while the other pokes into the open.
+	if a - _route[i - 1] != dir:
+		return false
+	return _is_choke(a, _route[i + 1], Vector2i(dir.y, -dir.x))
+
+## Which eligible cells actually get one. Drawn from `_rng`, so the ramps are a
+## function of SEED like the rest of the level rather than of the order the route
+## happens to be walked in.
+func _choose_ramps(candidates: Array[int]) -> Array[int]:
+	if candidates.is_empty():
+		return []
+	var pool := candidates.duplicate()
+	# Fisher-Yates on _rng, NOT Array.shuffle() - that draws from the global RNG,
+	# and the level would stop being reproducible from SEED.
+	for i in range(pool.size() - 1, 0, -1):
+		var j := _rng.randi_range(0, i)
+		var t: int = pool[i]
+		pool[i] = pool[j]
+		pool[j] = t
+
+	var out: Array[int] = []
+	# One before the first gate if the seed offers one at all. The first ramp a
+	# player meets is where crouch gets taught, and after the first gate means
+	# teaching it with watchers already in play. WHICH early cell is still the
+	# seed's choice - the pool is already shuffled - only that there is one.
+	if _first_gate_i > 0:
+		for i in pool:
+			if i < _first_gate_i:
+				out.append(i)
+				break
+
+	var want: int = clampi(int(round(candidates.size() * RAMP_FRACTION)), 1, RAMP_MAX)
+	for i in pool:
+		if out.size() >= want:
+			break
+		var spaced := true
+		for k in out:
+			if absi(k - i) < RAMP_MIN_SPACING:
+				spaced = false
+				break
+		if spaced:
+			out.append(i)
+	out.sort()
+	return out
+
+## Triplanar, because a BoxMesh's own UVs stretch a 4.4 x 0.36 x 3.6 slab into
+## smears and the whole point of this thing is that its material reads clearly.
+func _ramp_material() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	var t := load(RAMP_TEX) as Texture2D
+	if t:
+		m.albedo_texture = t
+		m.uv1_triplanar = true
+		m.uv1_scale = Vector3(0.45, 0.45, 0.45)
+	else:
+		push_warning("missing ramp texture: " + RAMP_TEX)
+	m.roughness = 0.95
+	return m
+
+## Local +X across the corridor, +Z along the direction of travel - the same
+## convention the gates use. The player arrives from -Z, so the -Z edge is the
+## low one: they meet the gap before they meet the slab.
+func _ramp(nm: String, at: Vector3, yaw: float, mat: Material) -> void:
+	var root := Node3D.new()
+	root.name = nm
+	_level.add_child(root)
+	root.owner = _root
+	root.position = at
+	root.rotation_degrees = Vector3(0, yaw, 0)
+
+	var body := StaticBody3D.new()
+	body.name = "Solid"
+	root.add_child(body)
+	body.owner = _root
+
+	# Negative tilt drops the -Z end: rotating about X by t sends a point at
+	# z = -L/2 to y = +L/2 * sin(t), so a negative t is what puts the low edge on
+	# the side the player walks in from.
+	var tilt := deg_to_rad(RAMP_TILT_DEG)
+	# Where the centre has to sit for the low edge's UNDERSIDE to land on
+	# RAMP_GAP: half the slab's rise, plus its thickness measured vertically.
+	var half_rise := RAMP_LENGTH * 0.5 * sin(tilt)
+	var vert_thick := RAMP_THICK * 0.5 / cos(tilt)
+	var centre_y := RAMP_GAP + half_rise + vert_thick
+
+	# Wider than the corridor so it buries its ends in the walls and cannot be
+	# walked around - the ramp is a gap to fit through, not an obstacle to skirt.
+	_ramp_box(body, "Slab", Vector3(0, centre_y, 0),
+		Vector3(CORRIDOR_W + 0.4, RAMP_THICK, RAMP_LENGTH),
+		Vector3(-RAMP_TILT_DEG, 0, 0), mat)
+
+	# What is holding it up, in the two corners of the low end. They also pinch
+	# the gap to the middle of the corridor, so ducking through is a line the
+	# player has to aim at rather than a whole wall that happens to be short.
+	var low_z := -RAMP_LENGTH * 0.5 + 0.35
+	for side: float in [1.0, -1.0]:
+		_ramp_box(body, "Prop%s" % ("L" if side < 0.0 else "R"),
+			Vector3(side * (CORRIDOR_W * 0.5 - 0.35), RAMP_GAP * 0.5, low_z),
+			Vector3(0.7, RAMP_GAP, 0.8), Vector3.ZERO, mat)
+
+	# Loose spill on the floor, so it looks like something fell rather than like
+	# a slab that was installed. No collider: ankle height, same rule as DECOR.
+	for j in range(3):
+		var chunk := MeshInstance3D.new()
+		chunk.name = "Chunk%d" % j
+		var bm := BoxMesh.new()
+		bm.size = Vector3(_rng.randf_range(0.3, 0.7), _rng.randf_range(0.2, 0.4),
+			_rng.randf_range(0.3, 0.7))
+		chunk.mesh = bm
+		chunk.material_override = mat
+		root.add_child(chunk)
+		chunk.owner = _root
+		chunk.position = Vector3(_rng.randf_range(-1.6, 1.6), bm.size.y * 0.5,
+			low_z + _rng.randf_range(-0.9, 0.2))
+		chunk.rotation.y = _rng.randf_range(0.0, TAU)
+
+func _ramp_box(body: StaticBody3D, nm: String, pos: Vector3, size: Vector3,
+		rot_deg: Vector3, mat: Material) -> void:
+	var mi := MeshInstance3D.new()
+	mi.name = nm
+	var bm := BoxMesh.new()
+	bm.size = size
+	mi.mesh = bm
+	mi.material_override = mat
+	body.add_child(mi)
+	mi.owner = _root
+	mi.position = pos
+	mi.rotation_degrees = rot_deg
+
+	var cs := CollisionShape3D.new()
+	cs.name = nm + "Col"
+	var box := BoxShape3D.new()
+	box.size = size
+	cs.shape = box
+	body.add_child(cs)
+	cs.owner = _root
+	cs.position = pos
+	cs.rotation_degrees = rot_deg
+
 ## A prop wrapped in a smashable body: the kit model under "Art", a box collider
 ## sized from the piece's own measured bounds, and breakable.gd on the root.
 ##
@@ -491,7 +730,8 @@ func _gate(nm: String, at: Vector3, yaw: float) -> void:
 ## _ready() immediately and anything read there would predate the override.
 func _breakable(model: String, nm: String, pos: Vector3, yaw: float,
 		hits: int, color: Color, piece_scale: Vector3 = Vector3(S, S, S),
-		parent: Node = null, script_path: String = BREAKABLE) -> Node3D:
+		parent: Node = null, script_path: String = BREAKABLE,
+		props: Dictionary = {}) -> Node3D:
 	if not ResourceLoader.exists(KIT % model):
 		push_warning("missing kit piece: " + model)
 		return null
@@ -500,6 +740,11 @@ func _breakable(model: String, nm: String, pos: Vector3, yaw: float,
 	body.set_script(load(script_path))
 	body.set("hits", hits)
 	body.set("debris_color", color)
+	# Anything else the script exports - `jammed` on a door leaf, say. Same
+	# before-add_child rule as the two above, and the reason this is a bag rather
+	# than more parameters is that only door.gd uses it.
+	for k: String in props:
+		body.set(k, props[k])
 	var host: Node = parent if parent else _level
 	host.add_child(body)
 	body.owner = _root
@@ -545,6 +790,10 @@ func _place_props() -> void:
 		# Crates are solid now, so keep them off the cells the watchers spawn on -
 		# a pack materialising inside a barrel gets shoved out of formation.
 		if _is_pack_cell(i):
+			continue
+		# ...and off the ramp cells, where a crate would sit in the one gap the
+		# player has to crouch through.
+		if _ramp_at.has(i):
 			continue
 		var c := _coarse_world(_route[i])
 		var side := 1.0 if _rng.randf() < 0.5 else -1.0

@@ -24,6 +24,7 @@ extends StaticBody3D
 signal taken
 
 const DAGGER_FBX := "res://assets/dagger/dagger.fbx"
+const VARIANTS := preload("res://scripts/dagger_variants.gd")
 
 ## The dagger's own textures were never shipped with the FBX, so its parts fall
 ## back to flat colours - the same ones tools/mount_dagger.gd uses, so the
@@ -48,6 +49,10 @@ const ITEMS := {
 }
 
 @export var item: String = "dagger"
+## Which of dagger_variants.gd's 24 blades this one looks like. "" is the
+## original dagger.fbx. **A skin only** - the id, the card and what it grants are
+## identical either way, which is the whole point of keeping one item.
+@export var variant: String = ""
 @export var take_label: String = "Take"
 ## Bob and spin, so a dropped item reads as loot rather than as scenery.
 @export var bob_height: float = 0.10
@@ -66,7 +71,8 @@ var _taken: bool = false
 
 ## Builds a pickup for `item` and drops it into the tree at `at`.
 ## `host` should outlive the chest that spawned it (pass the chest's parent).
-static func spawn(host: Node, at: Vector3, item_id: String) -> Node3D:
+static func spawn(host: Node, at: Vector3, item_id: String,
+		variant_id: String = "") -> Node3D:
 	if host == null or not host.is_inside_tree():
 		return null
 	if not ITEMS.has(item_id):
@@ -76,6 +82,9 @@ static func spawn(host: Node, at: Vector3, item_id: String) -> Node3D:
 	var p: StaticBody3D = script.new()
 	p.name = "Pickup_" + item_id
 	p.item = item_id
+	# Set BEFORE add_child: _ready() builds the art immediately, and a variant
+	# assigned afterwards would arrive one step too late to be seen.
+	p.variant = variant_id
 	host.add_child(p)
 	p.global_position = at
 	# _ready() already ran (add_child is immediate) and captured the pre-move
@@ -115,7 +124,12 @@ func interact(_by: Node = null) -> bool:
 	if vm == null or not vm.has_method(method):
 		push_warning("pickup: nothing in group 'viewmodel' with %s()" % method)
 		return false
-	vm.call(method)
+	# The variant travels with the grant, so the blade you saw floating is the
+	# blade you end up holding. An empty one means the original dagger.
+	if variant != "":
+		vm.call(method, variant)
+	else:
+		vm.call(method)
 	_taken = true
 	taken.emit()
 	# Stop being a target the moment it is claimed; the ray runs every physics
@@ -138,7 +152,22 @@ func _build() -> void:
 	var art := Node3D.new()
 	art.name = "Art"
 	add_child(art)
-	_build_dagger(art)
+	# A variant is a skin on the same item, so it only changes what gets built -
+	# never the id, the card or what the thing grants.
+	if variant != "" and VARIANTS.exists(variant):
+		var mi := VARIANTS.build(variant, true)
+		if mi:
+			# The variant is normalised to pivot on its GRIP, which is right in
+			# the hand and wrong here: a floating pickup should spin about its
+			# middle. get_aabb() is mesh-local, so the centre has to go through
+			# the instance's own transform before it can be cancelled out.
+			var centre: Vector3 = mi.transform * mi.get_aabb().get_center()
+			mi.position -= centre
+			art.add_child(mi)
+		else:
+			_build_dagger(art)
+	else:
+		_build_dagger(art)
 
 	# One collider for the whole thing, sized generously - the player is aiming
 	# at a small floating object with a crosshair, and a tight box makes it

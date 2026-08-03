@@ -35,6 +35,10 @@ const OPEN_ANIM := "Take 001"
 ## tall, and the lid swings up and back over that - so anything at chest-top
 ## height is hidden behind the open lid. This clears both.
 @export var loot_offset: Vector3 = Vector3(0.0, 1.35, 0.0)
+## Roll a random blade out of dagger_variants.gd when this chest gives up a
+## dagger. Off makes every chest yield the original one, which is what the
+## screenshot tools want when they need a repeatable picture.
+@export var random_variant: bool = true
 
 @export_group("Destruction")
 ## Whether the chest can be smashed open instead of opened. Off by default - the
@@ -50,6 +54,7 @@ const OPEN_ANIM := "Take 001"
 @export var debris_color: Color = Color(0.58, 0.42, 0.22)
 
 const PICKUP := preload("res://scripts/pickup.gd")
+const VARIANTS := preload("res://scripts/dagger_variants.gd")
 const DEBRIS := preload("res://scripts/debris.gd")
 const SHATTER := preload("res://scripts/shatter.gd")
 
@@ -145,9 +150,15 @@ func _spill() -> void:
 	if _spilled or loot == "":
 		return
 	_spilled = true
+	# A random blade out of the pack, decided the moment the chest gives it up.
+	# Purely cosmetic - `loot` is still "dagger" and still grants the same thing,
+	# so nothing downstream has to know these exist.
+	var skin := ""
+	if random_variant and loot == "dagger":
+		skin = VARIANTS.pick()
 	# Parented to the chest's parent, not the chest, so the floating item is
 	# neither dragged around by the lid animation nor freed with the wreckage.
-	PICKUP.spawn(get_parent(), global_position + loot_offset, loot)
+	PICKUP.spawn(get_parent(), global_position + loot_offset, loot, skin)
 
 func _bind_material() -> void:
 	var mat := StandardMaterial3D.new()

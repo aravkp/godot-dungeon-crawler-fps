@@ -40,15 +40,18 @@ must not be relied on by game code.
 | Input | Action |
 |---|---|
 | WASD / arrows | move |
-| Shift | sprint |
-| Space | jump; while wall running, kick off the wall |
+| Shift | **crouch** — held, not toggled |
+| Space | jump |
 | Mouse | look |
 | Left click | attack — alternating jabs, or the dagger once looted. **Hold to keep swinging.** |
 | E | interact — opens the chest the crosshair is on, lifts the gate, or takes the pickup |
 | Escape | release mouse (click to recapture) |
 
-Wall running engages automatically: be airborne, moving above
-`wall_run_min_speed`, and alongside a near-vertical surface.
+**Sprint and wall running were both removed.** The corridor level is 4 m wide
+and 4 m tall, which is not enough room to wall run in, and a sprint on top of a
+single walk speed only ever made the walk feel like the punishment. Shift now
+lowers you instead — see the crouch notes under `player.gd`, and the two things
+it exists for under "Collapsed ramps" and "Doors".
 
 ## Scenes
 
@@ -66,7 +69,7 @@ main (Node)
 ├─ Player (CharacterBody3D)  group "player" → player.gd
 │  ├─ PlayerMesh             capsule, cast_shadow = SHADOWS_ONLY
 │  ├─ PlayerCollision        CapsuleShape3D r=0.5 h=2
-│  └─ Head (Node3D)          y=0.7, pitch + wall-run roll pivot
+│  └─ Head (Node3D)          y=0.7 standing, pitch pivot; crouch lowers it
 │     └─ Camera3D
 │        ├─ ViewModel        bob/sway pivot, neutral at origin
 │        │  └─ Arms          instance of assets/hands/arms_rig.glb → arms.gd
@@ -109,16 +112,69 @@ First-person controller. Custom gravity, **not** the project default:
 apex **2.21 m**. Coyote time 0.12 s. Air acceleration is deliberately lower than
 ground (30 vs 75).
 
-Wall running: raycasts each side (`wall_check_distance = 0.85` from body centre)
-for a surface with `|normal.y| < 0.3`. Requires `wall_run_min_speed` horizontal
-speed. While attached, it drives velocity along the wall tangent in the facing
-direction, sinks slowly instead of falling, rolls the camera
-`wall_run_tilt_degrees`, and times out after `wall_run_max_time`. Jump kicks off
-along the wall normal. `wall_reattach_delay` prevents instant re-grip.
+One ground speed: **walk 8.5**, dropping to **crouch_speed 3.6** as you duck.
 
-Public: `is_wall_running() -> bool`.
+**Crouching is a real size change, not a camera trick.** The capsule shrinks from
+`stand_height` (2.0, read off the scene rather than assumed) to `crouch_height`
+(1.15), and **the collider's centre comes DOWN by half the difference so the feet
+stay put**. That is the whole reason a 1.35 m gap under a jammed gate is
+genuinely impassable standing and genuinely passable crouched: nothing decides it
+but the size of the capsule, so there are no trigger volumes and nothing to keep
+in sync.
 
-Speeds: walk 8.5, sprint 13.5.
+**That sign is the entire mechanic, and getting it wrong does not look like a
+collider bug.** A capsule at local `y = 0` with height `H` spans `-H/2 .. +H/2`,
+so its bottom is at `-H/2`; shrink `H` and the bottom *rises* by
+`(H_stand - H_crouch)/2` unless the centre comes down by the same amount. With
+the sign flipped the body is left floating, falls 0.85 m to find the floor, and
+takes the camera with it — measured **eye height 0.171 m, and it never comes back
+up**, so one crouch leaves the player permanently at ankle level. It reads as
+"sinking into the ground", not as anything to do with a capsule.
+
+The capsule radius is **0.5**, so `crouch_height` can never go below **1.0** — a
+capsule is two hemispheres and cannot be shorter than its own diameter.
+
+**You cannot stand back up under something.** Releasing Shift runs a
+`intersect_shape` with a standing-sized capsule first and stays crouched while it
+hits anything. The probe capsule is a hair under the real one (0.02 off the
+radius, 0.04 off the height): at exactly its own size it reports the floor and
+any wall being leaned on, and standing up becomes impossible everywhere.
+
+Speed follows the crouch blend rather than switching at a threshold, so ducking
+bleeds speed off instead of dropping it in one frame.
+
+**One hit kills you.** `take_hit(amount, at, from) -> bool` is the same damage
+contract the enemies and the breakables answer, and `amount` is deliberately
+ignored — there is no health, no armour and no damage number anywhere in the
+project. It returns `false` once already dead, so a watcher that gets a second
+swing off before the respawn cannot kill you twice.
+
+**The camera collapsing IS the death animation** — there is no third-person body
+to ragdoll. Over `death_fall_time` the eye drops to `death_eye_height` (0.25 m
+off the floor, measured back through the body origin, which sits half a standing
+height above the feet) and the view rolls `death_roll_degrees` to one side. The
+side comes from the killing blow's `from` direction: you fall **away** from the
+hit, and the camera looks down −Z, so tipping the head right is a *negative*
+rotation about +Z. A straight-on hit still picks a side — a drop with no roll
+reads as the camera sinking through the floor rather than as a body going down.
+
+The corpse still falls (dying mid-air lands where it would have landed), and
+input is off in three places, because the game reads input in three places:
+`player.gd`'s own handler early-returns, `_physics_process` diverts to
+`_tick_death`, and **the viewmodel's handlers are switched off** — `arms.gd`
+polls the mouse button in its own `_process`, so a held attack goes on throwing
+punches from the floor otherwise. Whether they were running is *remembered*
+rather than assumed, the same rule `cutscene.gd` follows: dying during the
+opening scene must not hand the player their arms back early.
+
+Then `respawn_delay` (2.2 s) later, `_respawn()` — the same one the fall-out-of-
+the-world path uses. **Nothing about the level resets**: an alerted camp is still
+alerted and still where it was. Respawning inside one is therefore fatal again,
+which `_probe_player_death.gd` hit as five spurious failures before it learned to
+walk the killer off first.
+
+Public: `is_crouching() -> bool`, `is_dead() -> bool`, `take_hit(...)`, and the
+`died` signal.
 
 ### `arms.gd` (Node3D, on the `Arms` instance)
 Viewmodel. **One attack, on one button, and holding it repeats.**
@@ -212,7 +268,15 @@ to a floor.
 
 ### `watcher_enemy.gd` (CharacterBody3D)
 Zelda-hobgoblin style guard — the deliberate opposite of the bat. Hand-placed in
-trios around a camp, **3 hits to kill**, grounded, melee.
+trios around a camp, **one hit to kill**, grounded, melee.
+
+**Everything dies to a single hit now**, watchers included (bats always did).
+Every damage source in the game deals 1, so any connecting swing is lethal. The
+`HURT` state and `CLIP_HURT` are consequently **unreachable at the default
+health** — they are kept only because nothing stops a level setting `max_health`
+higher, and `_probe_ragdoll.gd` deliberately attacks with `take_hit(1)` rather
+than over-damaging, so a watcher that quietly went back to needing several hits
+would show up as a failure rather than passing.
 
 States: `GUARD → CHASE → ATTACK`, plus `HURT` and `DEAD`. In `GUARD` it stands
 still and drifts back to its placed facing, testing a vision cone every
@@ -259,8 +323,19 @@ as an impulse to whichever bone was nearest the impact. Then:
   still colliding with the ground cannot be pushed into it. Freeing on a timer
   instead blinked it out mid-frame.
 
-**The mace swing calls `take_hit` on the player, which currently does nothing** —
-there is no player health system. The call is the contract for when there is one.
+**The mace kills you in one hit, and it is the only thing in the game that can.**
+Bats still do nothing but swarm. The call site never changed — `_land_hit()` has
+always called `take_hit` on the player at `ATTACK_HIT_AT`; what changed is that
+`player.gd` now answers it. That is worth knowing before "adding damage" to
+anything else: the contract is already wired everywhere, and a source with
+nothing to land on looks identical in code to one that works.
+
+**The swing can still miss, and that is what makes it fair.** `_land_hit()` tests
+`attack_reach` and the 70° arc *at the moment of impact*, not when the swing
+started, so backing out during the ~1.0 s wind-up beats it — asserted, not
+assumed, by `_probe_player_death.gd`. `_can_strike()` also refuses to start a
+swing at an already-dead player, so a watcher holds its camp instead of beating a
+corpse for two seconds.
 
 ### `ragdoll.gd`
 Shared runtime ragdoll, used via `preload` like `blood.gd` and for the same
@@ -277,11 +352,44 @@ sidesteps that and costs nothing until something dies.
 segments a side. Fingers and toes add solver cost and jitter for detail nobody
 sees on a corpse. Bones are matched by **suffix**, so `mixamorig_LeftArm` and a
 bare `LeftArm` both resolve and a rig missing an entry just skips it. Joints are
-cone twist; spans are per-entry.
+cone twist; swing and twist spans are per-entry, and so are masses.
 
-**`ignore()` is not optional here.** The bodies sit on collision *layer* 0 so
-nothing targets them, but their *mask* still sees layer 1 — and this project has
-no layer convention, so the ground, the player and every enemy share layer 1.
+**Corpses have their own collision layer (2), and the reason is not what you'd
+guess.** Layer **0** is the obvious choice for "nothing should ever target this",
+and it was the original one. Collision requires `layer & mask` to be non-zero on
+at least one side — so bodies on layer 0 **cannot collide with each other**
+either. The ragdoll was fully self-intersecting: arms sank through the chest,
+thighs through the pelvis, and the corpse **flattened into a pancake thinner than
+the body it came from** as everything settled into the same plane. Layer 2 with a
+mask of `world|self` fixes it and keeps the original property, because nothing
+else in this project masks anything but layer 1.
+
+**`sink()` clears the layer as well as the mask.** Corpses see each other now, so
+clearing only the mask leaves a sinking body still solid to a fresher one beside
+it, and it hangs up halfway into the floor. One-hit kills make two corpses in the
+same place the normal case rather than a curiosity.
+
+**Tuning notes, all of which were visible failures first.** *Twist* is the
+rubber-limb dial — swing lets a joint bend, which corpses do, while twist lets it
+corkscrew, which reads as boneless; elbows and knees keep a usable swing (a
+mannequin is the equally obvious opposite failure) and almost no twist. *The
+spine and hips are the tight ones*: give them range and the legs tuck to the
+chest and the torso folds over them, so the body lands as a bundle instead of
+toppling. Masses are roughly human (~64 kg total) and the **ratios** are what
+matter — a torso several times a forearm is what makes it fall as one thing with
+limbs rather than eleven similar objects tied together.
+
+**`start()` inherits the character's velocity**, captured in `_die()` *before*
+`velocity` is cleared. Without it a corpse stops dead in the air and drops
+straight down — which is exactly what it is, the animation being switched off,
+and reads that way. The kill impulse is applied **off-centre**, at the real hit
+point, so it turns the body as well as shoving it; that is most of what makes a
+blow look aimed. Initial angular velocity is then clamped, or an off-centre
+impulse on a 1.5 kg forearm spins it like a rotor and drags the corpse with it.
+
+**`ignore()` is not optional here.** The bodies' *mask* still sees layer 1 — and
+this project has no layer convention, so the ground, the player and every enemy
+share layer 1.
 Anything that walks over a corpse therefore shoves it. Killing a watcher alerts
 its squad and the siblings charge straight across the body: a Camp_00 corpse slid
 a measured **3.9 m** before the exceptions went in. Excluding actors one by one
@@ -522,6 +630,50 @@ up to most of the screen into mush.
 playing onto it does, which is what frees the sprite. Anything stepping the
 animation by hand has to disconnect that first — see `_probe_slash.gd`.
 
+### `dagger_variants.gd`
+The 24 blades of the CraftPix low-poly dagger pack, as interchangeable **skins
+for the one dagger item**. Same `item` id, same `unlock_dagger`, same HUD card,
+same reach and damage — a chest just gives up a different-looking blade each
+time. Used via `preload`, like `blood.gd` and `slash_fx.gd`.
+
+**What the pack is**, measured with `tools/_probe_daggers.gd` rather than
+assumed: every model is a *single* mesh, 148–1260 tris, running
+handle-at-the-bottom along **+Y** with the model origin on the butt of the grip,
+0.29–0.60 m long, sharing one texture. That consistency is what lets one rule
+serve all 24; a pack that disagreed with itself would need a table.
+
+**Two normalisations, both load-bearing:**
+
+- **Scale.** Each is scaled so its length matches the original `dagger.fbx`
+  (0.254 m). `DaggerMount`'s position and rotation were solved against *that*
+  dagger, so anything else lands wrong — and a 0.60 m model is a short sword in a
+  first-person hand.
+- **Pivot.** The mesh is moved so the **grip centre** sits on the node origin,
+  not the model origin. `mount_dagger.gd` found this the hard way: rotating about
+  the model origin swings the handle out of the palm on a lever as long as the
+  blade. Pivot on the grip and rotation behaves like a wrist.
+
+**`GRIP_FRAC` is measured, not guessed.** The original's own named `grip` part
+centres **10.6%** of its length up from the base, so after the length
+normalisation that same fraction puts every new grip where the old one was.
+
+**Detecting each guard from the mesh was tried first and does not work.** The
+plan was to profile cross-sections and take the widest slice below the midpoint.
+On roughly half this pack the widest slice below the midpoint is the *blade* —
+several of these blades are broader than the crossguards beneath them — so it
+reports 45–49% and puts the pivot near the tip; `_dagger_12` reports 3%. One
+measured number off the original beats twenty-four unreliable ones. The routine
+is kept in `_probe_daggers.gd`, marked diagnostic, because its output is the
+evidence that it fails.
+
+The variant travels **chest → pickup → hand**: `chest.gd` rolls one when it
+spills (`random_variant`, on by default), `pickup.gd` carries it as a field and
+passes it to `unlock_dagger(variant)`, and `arms.gd` swaps it onto the mount.
+Three separate pieces of code, so `_probe_daggers.gd` asserts the whole chain —
+a skin that is rolled but not carried through just silently shows the original.
+`tools/_probe_grip_sheet.gd` renders all 24 as held, which is the only check that
+really settles the fit.
+
 ### `pickup.gd` (StaticBody3D)
 A floating item the player takes with `E`, built **in code** via
 `pickup.spawn(host, at, item_id)` — there is no `.tscn`, so the item table is the
@@ -554,6 +706,13 @@ item card under the crosshair:
  Melee - hold to swing     <- subtitle(), 14px grey
     [E] Take           <- prompt(),   18px cream
 ```
+
+**Death is the only state the HUD has**, pushed by `player.gd` via
+`set_dead(bool)` on the killing blow and again on the respawn: the crosshair and
+the whole item card go away — a crosshair over a corpse says the swing is still
+yours to take — and `YOU DIED` is drawn over a **vignette rather than a full
+fade**, because the point of leaving the camera on the floor is seeing what
+killed you.
 
 ### `cutscene.gd` (CanvasLayer, built in code)
 **The opening scene of the corridor level.** A thing rises out of the floor one
@@ -597,6 +756,9 @@ Things `corridors.tscn` needs that the outdoor level does not, all handled in
 - **Everything breakable lives here and nowhere else.** Crates, barrels, the
   three chests and every door are `breakable.gd` / `chest.gd` bodies. The outdoor
   arena has no destructibles at all.
+- **Everything that needs a crouch lives here too** — the jammed gates and the
+  collapsed ramps. The outdoor arena has nothing to duck under, so Shift does
+  nothing there but slow you down.
 - **A lamp per gate.** The route lamps sit at cell *centres* and a gate stands on
   a *boundary*, so it lands between two of them and the leaf renders as a black
   hole in the wall — the one thing an obstacle you are meant to attack cannot
@@ -608,6 +770,26 @@ Things `corridors.tscn` needs that the outdoor level does not, all handled in
 ### Doors
 A **gate** seals the corridor at a boundary between two route cells, and there
 are two ways past it: **one swing smashes it, or `[E]` lifts it** (`door.gd`).
+
+**Some gates are JAMMED** — stuck partway up, with a `jam_gap` of **1.35 m**
+underneath. They cannot be lifted at all, so the ways past one are to *duck under
+it* or to smash it. That gap is chosen to sit clear of both player sizes: the
+crouched capsule is 1.15 and the standing one is 2.0. Every `JAM_EVERY`-th gate
+after the first is jammed; **the first gate never is**, because it is where the
+player learns that a gate is a thing you open and a jammed one teaches the wrong
+lesson first.
+
+**The leaf is raised by the builder, not by `door.gd`.** `_ready()` runs inside
+`add_child()`, and `_breakable()` sets `position` on the line *after* that — so a
+lift applied in `_ready()` is overwritten a moment later and the gate silently
+sits closed, looking exactly like a gate that is supposed to be closed. The
+builder owns where things are; the script owns the refusal to lift. This cost
+real debugging time: the `.tscn` is the place to check, and a jammed leaf must
+read `transform = Transform3D(..., 0, 1.35, 0)`.
+
+A jammed gate still answers the interaction contract and deliberately says
+"Jammed" rather than going quiet — a door that offers nothing reads as scenery,
+and the player has to understand that ducking or smashing are the options.
 Sizes were measured, not guessed — `tools/_probe_kit_sizes.gd`
 prints a piece's front silhouette as an occupancy map, so a doorway is read off
 the geometry:
@@ -632,6 +814,65 @@ rectangle.
 Gates go only where the corridor is exactly one cell wide on **both** sides of
 the boundary (`_is_choke`). Hung off a room, half a gate would seal nothing and
 the player would walk around the door.
+
+### Collapsed ramps
+A slab of ceiling that has come down across the corridor and wedged itself there.
+You **crouch under its low edge**. Built by `_place_ramps()` / `_ramp()`.
+
+**Which cells get one is drawn from `_rng`**, so ramps are a function of `SEED`
+like the rest of the level. The first version took the first eligible straight
+outright, which is not seeded at all — it is a function of the order the route
+happens to be walked in — and it put a ramp on **route 1, which is where the
+Warden rises for the opening cutscene**. The result was a granite slab built
+straight through the opening scene. `RAMP_CLEAR_ROUTE` now reserves routes 0–2:
+the spawn, the Warden's cell, and the dagger chest.
+
+Shuffling uses **Fisher–Yates on `_rng`, not `Array.shuffle()`** — that draws
+from the global RNG, and the level would quietly stop being reproducible from
+`SEED`.
+
+The picker *prefers* to place one before the first gate, because the first ramp a
+player meets is where crouch gets taught and after the first gate means teaching
+it with watchers already in play. Which early cell is still the seed's choice —
+the pool is shuffled first — and it is only a preference: on a seed with no
+eligible cell that early there simply is not one. **The builder prints the
+candidate list as well as the chosen routes**, because "no early ramp" needs to
+be distinguishable from "the picker ignored one", and only that line does it.
+
+**Deliberately not built from the dungeon kit.** It is boxes wearing
+`Horror_Stone_05` — a pale granite, where the shell is warm brick — because a
+collapse has to read as "this was not built like this" at a glance, and down a
+dark corridor the only thing carrying that is the material. Triplanar mapping,
+because a `BoxMesh`'s own UVs smear a 4.4 × 0.36 × 3.6 slab and a material that
+cannot be read defeats the point.
+
+The geometry is tied to the clearance rather than eyeballed: for the low edge's
+*underside* to land on `RAMP_GAP`, the slab's centre sits at that plus half its
+rise (`length/2 · sin θ`) plus its thickness measured vertically
+(`thick/2 ÷ cos θ`). Negative tilt about local X is what puts the low edge on the
+side the player walks in from — rotating by θ sends a point at `z = -L/2` to
+`y = +L/2·sin θ`. The slab is **wider than the corridor** so it buries its ends
+in the walls: a ramp is a gap to fit through, not an obstacle to walk around. Two
+support blocks in the corners of the low end pinch the gap to the middle, so
+ducking through is a line to aim at rather than a wall that happens to be short.
+
+Eligibility (`_ramp_ok()`) is one predicate, and every rule in it was a bug
+first:
+
+- **Not routes 0–2** — the opening, as above.
+- **Not within a cell of a gate.** A gate recorded at route index `j` stands on
+  the boundary between cells `j` and `j+1`, so both `j` *and* `j-1` put one
+  within 2 m of a ramp cell's centre — close enough that the leaf stands inside
+  the crouch gap and seals the very thing you are meant to duck through.
+  Checking only `i` misses half of them, which is how a ramp ended up sealed
+  behind a gate.
+- **Straight, and a choke.** On a turn the slab spans the wrong axis: one end
+  buries itself in the outside wall and the other pokes into the open.
+- **Not a pack cell**, and `RAMP_MIN_SPACING` route indices apart, so a seed
+  cannot stack two.
+
+Crates skip ramp cells too — one sitting in the gap is the one place a crate
+cannot go.
 
 ### The interaction contract
 `player.gd` casts `interact_range` (3.5 m) down the camera axis every physics
@@ -684,7 +925,18 @@ saves. The Player, Arms and DaggerMount are always preserved.
 "$GODOT" --path . -s tools/shot_dagger.gd                  # dagger-grip close-ups, NOT headless
 "$GODOT" --path . -s tools/shot_pickups.gd                 # loadout flow stills, NOT headless
 "$GODOT" --path . -s tools/shot_corridors.gd               # stills, NOT headless
+"$GODOT" --path . -s tools/shot_brief.gd                   # corridors as it plays, NOT headless
 ```
+
+`shot_brief.gd` is the presentable set — the corridor level as it plays, where
+`shot_corridors.gd` takes diagnostic angles. Two things it has to do that the
+older one does not, both of which are invisible until you look at the output:
+**it shoots through the player's own `Camera3D`** (the viewmodel hangs off that
+camera, so a free camera parked in the same spot renders the arms in world space,
+enormous and splayed), and **it frees the `Cutscene` CanvasLayer** after taking
+one shot of it, or its panel is drawn over every later frame. Freeing it also
+means hiding `Warden` by hand — the creature is a level node the cutscene merely
+animates, so it is otherwise stranded half-risen in the corridor.
 
 Throwaway probes, kept because the numbers they produce are the only defence
 against re-guessing (`_`-prefixed, like `_death_strip.gd` / `_gun_hand.gd`):
@@ -719,7 +971,71 @@ against re-guessing (`_`-prefixed, like `_death_strip.gd` / `_gun_hand.gd`):
 "$GODOT" --headless --path . -s tools/_probe_character.gd -- res://path/to.fbx
 # both dagger arcs frame by frame, plus a hit spark against a planted wall
 "$GODOT" --path . -s tools/_probe_slash.gd
+# every ramp and jammed gate: blocked standing, clear crouched?  exits non-zero
+"$GODOT" --headless --path . -s tools/_probe_crouch.gd
+# a watcher kills you, you come back, and a swing stepped out of misses
+"$GODOT" --headless --path . -s tools/_probe_player_death.gd
+# the dagger pack: chest->pickup->hand chain, then what is in each model
+"$GODOT" --headless --path . -s tools/_probe_daggers.gd
+# all 24 daggers side-on with the model origin marked (which end is the handle?)
+"$GODOT" --path . -s tools/_probe_dagger_sheet.gd
+# ...and all 24 AS HELD, which is the only check that settles the fit
+"$GODOT" --path . -s tools/_probe_grip_sheet.gd
 ```
+
+`_probe_grip_sheet.gd` needs a **second camera**, and that is not fussiness. The
+viewmodel is welded to the player camera, so narrowing that camera's fov to get
+close to the hand just pushes the fist — which sits low and right, not centred —
+straight out of frame. It parks a free camera in the world looking back at the
+mount instead.
+
+`_probe_crouch.gd` is the assertion behind the whole crouch mechanic, and no
+screenshot can make it — a gap you fit through and one you do not look identical
+in a picture. It checks **two separate things, and needs both**:
+
+1. **The controller.** Drives the real player with Shift and asserts the body
+   does not move — feet stay, eye drops ~0.68 m, everything returns on standing.
+2. **The level.** Whether the gaps are the right size, with capsule queries.
+
+They are different questions and the second cannot answer the first: the geometry
+checks position their own capsules from the floor up and never touch `player.gd`.
+The collider sign error above **passed every geometry check** while sinking the
+camera to ankle height in the actual game, and shipped once because of it. The
+controller check reproduces it as four explicit failures.
+
+The level half measures with **capsule queries rather than by walking a player at
+each obstacle**. Simulating the walk sounds more honest and is not: it also
+measures pathing, spawn clearance and which way a piece's local axes happen to
+point, so a failure could mean the gap is wrong *or* that the probe aimed the
+player at a wall. Three traps it hit on the way to being trustworthy, all of
+which produced confident wrong answers:
+
+- **A cross-section only counts as blocked when EVERY lateral offset is blocked.**
+  Failing it the moment any one offset collides is the obvious version: a gate's
+  jambs sit 1 m either side of the opening, so the outer samples always collide
+  and every gate reads as sealed to a crouching player.
+- **Every `CharacterBody3D` is excluded**, the same way `_probe_smash.gd`'s gate
+  rays are, and for the same reason — a watcher stands in a doorway and the query
+  reports the enemy rather than the hole.
+- `EDGES` yaws a piece to face *inward*, which is backwards from the direction of
+  travel for two of the four headings, so **gates and ramps do not agree on which
+  way their local +Z points**. Nothing in the probe reads local axes any more.
+
+`_probe_player_death.gd` **drives the whole chain rather than calling
+`player.take_hit()` directly**, and that is the entire point of it. A watcher is
+parked next to the player, alerts on its own, closes, commits a swing, and
+`_land_hit()` deals the blow — because calling `take_hit()` by hand passes just
+as happily with the mace never connecting to anything, which is precisely the
+state this project was in for a long time: the call site existed and the method
+it called did not. It then asserts what a screenshot cannot — a second blow is
+refused, the viewmodel stops taking input, control comes back at the spawn point
+with the view and the HUD reset — and finally that **a swing stepped out of
+misses**, so the damage is dodgeable rather than a distance check. Two traps it
+hit: group membership is not queryable on the frame the scene enters the tree
+(every lookup comes back `null` without a `physics_frame` first), and the killer
+has to be walked away before the respawn is measured, or it kills the player
+again and five checks report a failed respawn when what happened was a second
+successful kill.
 
 `_probe_slash.gd` is the one probe that cannot screen-grab its subject live: the
 arc lasts ~215 ms and a 720×420 PNG costs ~95 ms to save, so a real-time capture
@@ -789,8 +1105,9 @@ clock.
 
 - **`build_terrain.gd`** — the current level. 120×120 m ground, a 6-step
   staircase (`STEP_RISE = 0.55`, chosen to stay inside the 1.28 m jump reach at
-  the time; jump is now higher), two walkable ramps, a wall-run course (a 28 m
-  corridor plus two long walls), 5 pillars, 4 watcher camps (camp 0 guards the
+  the time; jump is now higher), two walkable ramps, what used to be a wall-run
+  course (a 28 m corridor plus two long walls — now just geometry, since wall
+  running is gone), 5 pillars, 4 watcher camps (camp 0 guards the
   dagger, per `CAMP_LOOT`; the rest are empty since the pistol was cut), the
   HUD, and 34
   seeded scattered boxes that
@@ -897,6 +1214,7 @@ All of it is rebuilt by `build_terrain.gd`; editing the `WorldEnvironment` or
 | `assets/chest/` | `TreasureChest.FBX` + PBR set in `Textures/`. Lid (`chest_top`) is a separate mesh and the file carries its own open animation | Chest |
 | `assets/watcher/` | `watcher.fbx` — "Watcher of the Hollow Eye", 65-bone Mixamo rig, mace. Textures **must** live at `assets/watcher/minimosnter/texture/` — the FBX hardcodes that relative path, and moving them silently unbinds every material | Watcher enemy |
 | `assets/creature/` | `creature.fbx` — the Warden. **Static mesh, no rig, no animations**, 5960 tris, one material. Its origin sits at the *top* of the mesh and its bounds are dominated by the blade, so size and offset are both measured, never typed | The opening cutscene |
+| `assets/daggers/` | CraftPix free low-poly dagger pack — 24 single-mesh FBX (148–1260 tris) plus one shared texture. All handle-at-the-bottom along **+Y**, origin on the butt of the grip, 0.29–0.60 m long. `license.txt` points at craftpix.net's file licences | `dagger_variants.gd` |
 | `assets/vfx/` | `slash_arc.png` / `slash_impact.png` — 640×256 sheets from "Pixel Art Animations - Slashes". Each is a **5×2 grid of 128² cells read row-major**, nine frames used and the tenth empty. The pack's blue/cyan ramp of five; red is left free for blood, and the cold ramp reads as steel in the dark levels | `slash_fx.gd` |
 | `assets/fonts/` | `m5x7.ttf` — pixel font, authored at **16 px**. Godot's importer detects it as a pixel font and turns off subpixel positioning and hinting by itself. Use integer multiples of 16 for sizes; 34 and 40 come out mushy | `cutscene.gd` |
 | `assets/retro_character/` | `retro_character.fbx` — 38-bone Mixamo rig, 1504 tris, 16 clips (idle, walk, run, strafe, three boxing attacks, a knockdown, plus a 37.8 s concatenation of all of them and two export artifacts). 4.198 units tall as imported. Matches **11/11** of `ragdoll.gd`'s `CHAIN`. Texture needs re-binding by material name `BODY.011` | unused — see "Not implemented" |
@@ -1047,13 +1365,13 @@ trackpad input unless you force `MOUSE_MODE_VISIBLE` every frame.
 
 ## Not implemented
 
-- **No damage to the player.** Bats swarm and hover; there is no player health,
-  no contact damage, no death or restart. The HUD draws only a crosshair and the
-  interaction prompt plus the focused item's card — no health, ammo or score. The
-  watchers' mace swing does
-  call `take_hit` on the player at the right moment in the animation — the
-  method just does not exist yet, so it is a no-op. Adding player health is
-  enough to make them dangerous; nothing in the enemy needs changing.
+- **The watchers' mace is the only thing that can hurt you.** Bats still swarm
+  and hover with no contact damage, and nothing else in either level deals any.
+  There is no health to speak of — one hit kills, so the HUD still draws no
+  health bar, ammo or score, only the crosshair, the item card, and `YOU DIED`.
+  Death respawns you at the spawn point after 2.2 s; there is no restart, no
+  score kept, and **the level does not reset** — an alerted camp is still alerted
+  and still standing over its chest when you come back.
 - **Opening a chest does nothing but open it**, unless it has `loot` set. The two
   weapons are the only items — there is no inventory and no other loot beyond
   them, and "Lvl 1" implies no upgrade path yet. `chest.gd` emits `opened`.
@@ -1084,6 +1402,12 @@ trackpad input unless you force `MOUSE_MODE_VISIBLE` every frame.
   thumb, and its clips are authored for a camera 3 m away. As a third-person
   player body it is also missing a jump and a fall, which this game needs.
 - **No score, waves UI, or progression** beyond the spawner's rate ramp.
+- **Nothing but the player crouches, and nothing reacts to it.** `is_crouching()`
+  is public and no enemy reads it. Line of sight is a single raycast at chest
+  height, so ducking behind a crate does not break it and a watcher sees a
+  crouching player exactly as well as a standing one. Crouch is currently a way
+  through geometry and nothing else — making it a way to *hide* is one raycast
+  origin and one check away, and is the obvious next thing it wants to be.
 - **No audio** anywhere.
 - **No save/load, no menus.**
 - **No ranged attack.** The blood pistol, its bolt (`projectile.gd`), its pickup

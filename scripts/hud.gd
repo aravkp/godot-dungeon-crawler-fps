@@ -27,9 +27,18 @@ extends Control
 @export var subtitle_color: Color = Color(0.78, 0.78, 0.82)
 @export var prompt_color: Color = Color(1, 0.94, 0.75)
 
+@export_group("Death")
+@export var death_text: String = "YOU DIED"
+@export var death_size: int = 46
+@export var death_color: Color = Color(0.78, 0.09, 0.09)
+## Dimmed to the corners rather than a flat wash, so the corpse view is still
+## readable underneath it.
+@export var death_vignette: Color = Color(0, 0, 0, 0.45)
+
 var _prompt: String = ""
 var _title: String = ""
 var _subtitle: String = ""
+var _dead: bool = false
 
 func _ready() -> void:
 	# Full-rect and never eat clicks - the mouse is captured for looking.
@@ -53,12 +62,28 @@ func set_focus_info(item_title: String, item_subtitle: String) -> void:
 	_subtitle = item_subtitle
 	queue_redraw()
 
+## One hit kills, so this is the only state the HUD has. Pushed by player.gd on
+## the killing blow and again on the respawn.
+func set_dead(dead: bool) -> void:
+	if dead == _dead:
+		return
+	_dead = dead
+	if dead:
+		# A crosshair over a corpse says the swing is still yours to take.
+		_prompt = ""
+		_title = ""
+		_subtitle = ""
+	queue_redraw()
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		queue_redraw()
 
 func _draw() -> void:
 	var c := size * 0.5
+	if _dead:
+		_draw_death(c)
+		return
 	# Outline first, then the core on top, so every arm gets a dark edge.
 	for pass_i in range(2):
 		var col := outline if pass_i == 0 else color
@@ -94,3 +119,16 @@ func _draw() -> void:
 		font.draw_string(get_canvas_item(), at, text,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
 		y += float(fs) + 6.0
+
+## The whole death screen: darken the frame, then the one line. Deliberately not
+## a full-screen fade - the point of the corpse view is seeing what killed you.
+func _draw_death(c: Vector2) -> void:
+	draw_rect(Rect2(Vector2.ZERO, size), death_vignette)
+	var font := ThemeDB.fallback_font
+	var w := font.get_string_size(death_text, HORIZONTAL_ALIGNMENT_LEFT, -1,
+		death_size).x
+	var at := Vector2(c.x - w * 0.5, c.y)
+	font.draw_string(get_canvas_item(), at + Vector2(2, 2), death_text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, death_size, Color(0, 0, 0, 0.8))
+	font.draw_string(get_canvas_item(), at, death_text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, death_size, death_color)

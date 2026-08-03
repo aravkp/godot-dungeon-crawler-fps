@@ -31,6 +31,7 @@ extends Node3D
 signal dagger_unlocked
 
 const SLASH := preload("res://scripts/slash_fx.gd")
+const VARIANTS := preload("res://scripts/dagger_variants.gd")
 
 ## Bare-fists idle, used until the dagger is picked up.
 @export var idle_anim: StringName = &"guard_idle"
@@ -151,12 +152,22 @@ func _melee(clip: StringName) -> bool:
 
 ## Granted by a chest pickup. Reveals the dagger and swaps the idle to the pose
 ## the mount was fitted against, so the grip lands correctly from the first frame.
-func unlock_dagger() -> bool:
+##
+## `variant` is one of dagger_variants.gd's ids, or "" for the original blade.
+## It is only a SKIN - the item, the reach, the damage and the animations are the
+## same whichever one you pick up.
+func unlock_dagger(variant: String = "") -> bool:
 	if has_dagger:
 		return false
 	has_dagger = true
 	if _weapon:
 		_weapon.visible = true
+		# The mount's own transform is untouched; only what hangs off it changes.
+		# Every variant is pre-normalised to the original's length with its grip
+		# on the node origin, so the fit solved in mount_dagger.gd still holds.
+		var art := _weapon.get_node_or_null("Dagger") as Node3D
+		if art and variant != "":
+			VARIANTS.apply(art, variant)
 	# Start the dagger's pair from the top rather than wherever the fists left
 	# off, so looting mid-combo cannot open with the second swing.
 	_next_swing = 0
